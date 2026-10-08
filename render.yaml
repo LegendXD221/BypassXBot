@@ -1,9 +1,10 @@
 services:
-  - type: worker
+  - type: web
     name: bypassx-discord-bot
     runtime: python
     buildCommand: pip install -r requirements-bot.txt
     startCommand: python -m discord_bot.bot
+    healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: DISCORD_TOKEN

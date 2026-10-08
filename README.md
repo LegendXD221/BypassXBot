@@ -50,14 +50,17 @@ export BYPASS_API_URL='https://bypassx-bpzt.onrender.com'
 python -m discord_bot.bot
 ```
 
-## Render Worker
+## Render Web Service
 
-The included `render.yaml` defines a Background Worker:
+The included `render.yaml` defines a Web Service. The bot runs its Discord gateway and a small health server in the same process:
 
 ```text
 Build Command: pip install -r requirements-bot.txt
 Start Command: python -m discord_bot.bot
+Health Check: /health
 ```
+
+Render provides free Web Services with usage limitations. Free services may sleep when inactive, which can disconnect the Discord gateway. If the bot must remain online continuously, use an always-on VM or a paid worker.
 
 Set `DISCORD_TOKEN` in Render's environment settings. The bot uses the existing public API by default:
 

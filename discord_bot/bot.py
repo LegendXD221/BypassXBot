@@ -11,8 +11,10 @@ from typing import Any
 
 import discord
 import httpx
+import uvicorn
 from discord import app_commands
 from discord.ext import commands
+from fastapi import FastAPI
 
 LOG = logging.getLogger("bypassx.discord")
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
@@ -31,6 +33,7 @@ API_URL = os.getenv("BYPASS_API_URL", "https://bypassx-bpzt.onrender.com").rstri
 API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
+PORT = env_int("PORT", 10000)
 
 
 class AutoChannelStore:
@@ -153,6 +156,17 @@ class BypassXBot(commands.Bot):
 
 
 bot = BypassXBot()
+web_app = FastAPI(title="BypassXBot", version="1.0.0")
+
+
+@web_app.get("/")
+async def web_root() -> dict[str, Any]:
+    return {"name": "BypassXBot", "status": "online", "discord_ready": bot.is_ready()}
+
+
+@web_app.get("/health")
+async def web_health() -> dict[str, Any]:
+    return {"status": "ok", "discord_ready": bot.is_ready()}
 
 
 async def require_manage_guild(interaction: discord.Interaction) -> bool:
@@ -274,4 +288,25 @@ if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN is required")
-    bot.run(token, log_handler=None)
+
+    async def main() -> None:
+        server = uvicorn.Server(
+            uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info", log_config=None)
+        )
+        bot_task = asyncio.create_task(bot.start(token, reconnect=True), name="discord-gateway")
+        web_task = asyncio.create_task(server.serve(), name="health-server")
+        done, pending = await asyncio.wait(
+            {bot_task, web_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if not task.cancelled() and task.exception():
+                raise task.exception()
+        await bot.close()
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
