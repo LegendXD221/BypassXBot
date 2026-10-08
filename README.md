@@ -15,6 +15,7 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Admin-only auto-bypass configuration.
 - Owner-only console commands and developer-guild-only maintenance commands.
 - Safe API timeout handling and no token/API secrets in source code.
+- Anti-abuse protection with per-user cooldowns, per-server cooldowns, and a global concurrency cap.
 
 ## Commands
 
@@ -44,6 +45,16 @@ Set `BOT_OWNER_IDS` to one or more comma-separated Discord user IDs. These comma
 
 Auto-bypass configuration is stored in `data/auto_channels.json`. On Render, the default filesystem is ephemeral; attach persistent storage or re-run the setup command after a worker restart if you need settings to survive restarts.
 
+## Rate limits and cooldowns
+
+Every manual or automatic bypass request is protected by:
+
+- `BYPASS_USER_COOLDOWN` — per-user cooldown in seconds; default `5`.
+- `BYPASS_GUILD_COOLDOWN` — per-server cooldown in seconds; default `2`.
+- `BYPASS_MAX_CONCURRENT` — maximum simultaneous API requests; default `3`.
+
+Automatic bypass processes one link per message. Cooldown responses do not call the API.
+
 ## Discord application setup
 
 1. Create an application and bot in the [Discord Developer Portal](https://discord.com/developers/applications).
@@ -63,6 +74,9 @@ pip install -r requirements-bot.txt
 export DISCORD_TOKEN='your-token'
 export BOT_OWNER_IDS='your-discord-user-id'
 export BYPASS_API_URL='https://bypassx-bpzt.onrender.com'
+export BYPASS_USER_COOLDOWN='5'
+export BYPASS_GUILD_COOLDOWN='2'
+export BYPASS_MAX_CONCURRENT='3'
 python -m discord_bot.bot
 ```
 

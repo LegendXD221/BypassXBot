@@ -21,3 +21,9 @@ services:
         sync: false
       - key: BOT_OWNER_IDS
         sync: false
+      - key: BYPASS_USER_COOLDOWN
+        value: "5"
+      - key: BYPASS_GUILD_COOLDOWN
+        value: "2"
+      - key: BYPASS_MAX_CONCURRENT
+        value: "3"

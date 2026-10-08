@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 LOG = logging.getLogger("bypassx.discord")
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
-MAX_AUTO_LINKS = 3
+MAX_AUTO_LINKS = 1
 MAX_MESSAGE_LENGTH = 1900
 
 
@@ -29,11 +29,21 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 API_URL = os.getenv("BYPASS_API_URL", "https://bypassx-bpzt.onrender.com").rstrip("/")
 API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
 PORT = env_int("PORT", 10000)
+USER_COOLDOWN_SECONDS = env_float("BYPASS_USER_COOLDOWN", 5.0)
+GUILD_COOLDOWN_SECONDS = env_float("BYPASS_GUILD_COOLDOWN", 2.0)
+MAX_CONCURRENT_BYPASSES = env_int("BYPASS_MAX_CONCURRENT", 3)
 
 
 def parse_ids(name: str) -> set[int]:
@@ -111,12 +121,46 @@ class AutoChannelStore:
                 pass
 
 
+class BypassLimiter:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._user_last: dict[int, float] = {}
+        self._guild_last: dict[int, float] = {}
+        self._slots = asyncio.Semaphore(MAX_CONCURRENT_BYPASSES)
+
+    async def reserve(self, user_id: int, guild_id: int | None) -> float:
+        now = asyncio.get_running_loop().time()
+        async with self._lock:
+            user_remaining = USER_COOLDOWN_SECONDS - (now - self._user_last.get(user_id, 0.0))
+            guild_remaining = 0.0
+            if guild_id is not None:
+                guild_remaining = GUILD_COOLDOWN_SECONDS - (now - self._guild_last.get(guild_id, 0.0))
+            remaining = max(user_remaining, guild_remaining, 0.0)
+            if remaining > 0:
+                return remaining
+            self._user_last[user_id] = now
+            if guild_id is not None:
+                self._guild_last[guild_id] = now
+            cutoff = now - max(USER_COOLDOWN_SECONDS, GUILD_COOLDOWN_SECONDS) * 2
+            self._user_last = {key: value for key, value in self._user_last.items() if value >= cutoff}
+            self._guild_last = {key: value for key, value in self._guild_last.items() if value >= cutoff}
+            return 0.0
+
+    async def __aenter__(self) -> "BypassLimiter":
+        await self._slots.acquire()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self._slots.release()
+
+
 class BypassXBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
         self.store = AutoChannelStore(CONFIG_PATH)
+        self.limiter = BypassLimiter()
         self.api_client = httpx.AsyncClient(timeout=httpx.Timeout(API_TIMEOUT, connect=15.0), follow_redirects=False)
         self._guild_locks: dict[int, asyncio.Lock] = {}
 
@@ -152,21 +196,40 @@ class BypassXBot(commands.Bot):
             LOG.exception("Invalid Bypass API response")
             return {"success": False, "error": "Bypass API returned an invalid response"}
 
-    async def send_result(self, destination: discord.abc.Messageable, user: discord.abc.User, url: str) -> None:
-        result = await self.resolve(url)
+    async def send_result(
+        self,
+        destination: discord.abc.Messageable,
+        user: discord.abc.User,
+        url: str,
+        guild_id: int | None = None,
+        ephemeral: bool = False,
+    ) -> bool:
+        remaining = await self.limiter.reserve(user.id, guild_id)
+        send_options: dict[str, Any] = {
+            "allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False, replied_user=False)
+        }
+        if ephemeral:
+            send_options["ephemeral"] = True
+        if remaining > 0:
+            embed = premium_embed("Slow down", f"Please wait **{remaining:.1f}s** before sending another bypass request.", ERROR_COLOR)
+            await destination.send(content=user.mention, embed=embed, **send_options)
+            return False
+
+        async with self.limiter:
+            result = await self.resolve(url)
         mention = user.mention
-        allowed = discord.AllowedMentions(users=True, everyone=False, roles=False, replied_user=False)
         if result.get("success"):
             target = str(result["destination"])
             embed = premium_embed("Link resolved", "Your destination is ready.", SUCCESS_COLOR)
             embed.add_field(name="Original", value=url[:1024], inline=False)
             embed.add_field(name="Destination", value=target[:1024], inline=False)
             embed.set_footer(text=f"Service: {result.get('service', 'unknown')} • Method: {result.get('method', 'unknown')}")
-            await destination.send(f"{mention}", embed=embed, allowed_mentions=allowed)
+            await destination.send(content=mention, embed=embed, **send_options)
         else:
             embed = premium_embed("Unable to resolve", result.get("error", "Unknown resolver error"), ERROR_COLOR)
             embed.add_field(name="Original", value=url[:1024], inline=False)
-            await destination.send(f"{mention}", embed=embed, allowed_mentions=allowed)
+            await destination.send(content=mention, embed=embed, **send_options)
+        return True
 
     async def on_ready(self) -> None:
         if self.user:
@@ -185,8 +248,7 @@ class BypassXBot(commands.Bot):
         if not links:
             return
         async with self.guild_lock(message.guild.id):
-            for link in links:
-                await self.send_result(message.channel, message.author, link.rstrip(".,!?)]}"))
+            await self.send_result(message.channel, message.author, links[0].rstrip(".,!?)]}"), guild_id=message.guild.id)
 
 
 bot = BypassXBot()
@@ -265,7 +327,7 @@ async def bypass_command(ctx: commands.Context, url: str | None = None) -> None:
         await ctx.reply(f"Usage: `{PREFIX}bypass <url>`")
         return
     await ctx.typing()
-    await bot.send_result(ctx.channel, ctx.author, url)
+    await bot.send_result(ctx.channel, ctx.author, url, guild_id=ctx.guild.id if ctx.guild else None)
 
 
 @bot.command(name="setautochannel")
@@ -358,14 +420,13 @@ async def debug_command(ctx: commands.Context) -> None:
 @app_commands.describe(url="The HTTP(S) shortlink to resolve")
 async def bypass_slash(interaction: discord.Interaction, url: str) -> None:
     await interaction.response.defer()
-    result = await bot.resolve(url)
-    if result.get("success"):
-        embed = premium_embed("Link resolved", "Your destination is ready.", SUCCESS_COLOR)
-        embed.add_field(name="Destination", value=str(result["destination"])[:1024], inline=False)
-        embed.set_footer(text=f"Service: {result.get('service', 'unknown')} • Method: {result.get('method', 'unknown')}")
-        await interaction.followup.send(content=interaction.user.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
-    else:
-        await interaction.followup.send(content=interaction.user.mention, embed=premium_embed("Unable to resolve", result.get("error", "Unable to resolve this URL"), ERROR_COLOR), allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+    await bot.send_result(
+        interaction.followup,
+        interaction.user,
+        url,
+        guild_id=interaction.guild.id if interaction.guild else None,
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="autobypass", description="Enable or disable automatic bypass in a channel")
