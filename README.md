@@ -92,6 +92,8 @@ Health Check: /health
 
 Render provides free Web Services with usage limitations. Free services may sleep when inactive, which can disconnect the Discord gateway. If the bot must remain online continuously, use an always-on VM or a paid worker.
 
+For external monitoring, see [`UPTIMEROBOT.md`](UPTIMEROBOT.md). Configure UptimeRobot to check the public `/health` endpoint every five minutes. This can keep the web service receiving traffic and alert you if it stops responding, but it cannot guarantee Discord gateway uptime on Render's free tier.
+
 Set `DISCORD_TOKEN` in Render's environment settings. The bot uses the existing public API by default:
 
 ```text
