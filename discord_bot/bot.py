@@ -34,8 +34,6 @@ API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
 PORT = env_int("PORT", 10000)
-REPO_URL = "https://github.com/LegendXD221/BypassXBot"
-API_DOCS_URL = f"{API_URL}/docs"
 
 
 def parse_ids(name: str) -> set[int]:
@@ -240,13 +238,6 @@ async def prefix_dev_check(ctx: commands.Context) -> bool:
     return True
 
 
-class HelpView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=180)
-        self.add_item(discord.ui.Button(label="GitHub", style=discord.ButtonStyle.link, url=REPO_URL))
-        self.add_item(discord.ui.Button(label="API Docs", style=discord.ButtonStyle.link, url=API_DOCS_URL))
-
-
 def help_embed() -> discord.Embed:
     embed = premium_embed("Command center", "Resolve links, automate channels, and manage your server with BypassX.")
     embed.add_field(
@@ -326,7 +317,7 @@ async def ping_command(ctx: commands.Context) -> None:
 
 @bot.command(name="help")
 async def help_command(ctx: commands.Context) -> None:
-    await ctx.reply(embed=help_embed(), view=HelpView())
+    await ctx.reply(embed=help_embed())
 
 
 @bot.command(name="ownerstatus")
@@ -407,7 +398,7 @@ async def ping_slash(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="help", description="Open the BypassX command center")
 async def help_slash(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(embed=help_embed(), view=HelpView(), ephemeral=True)
+    await interaction.response.send_message(embed=help_embed(), ephemeral=True)
 
 
 @bot.tree.command(name="ownerstatus", description="Show private bot owner diagnostics")

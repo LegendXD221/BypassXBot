@@ -11,7 +11,7 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Automatically detects up to three HTTP(S) links in configured channels.
 - Pings the user who posted the link.
 - `+status`, `+ping`, and `+help` utilities.
-- Premium branded embeds, command center, and API/GitHub buttons.
+- Premium branded embeds and command center.
 - Admin-only auto-bypass configuration.
 - Owner-only console commands and developer-guild-only maintenance commands.
 - Safe API timeout handling and no token/API secrets in source code.
