@@ -1,0 +1,1 @@
+"""BypassX Discord bot package."""

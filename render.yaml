@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: bypassx-discord-bot
+    runtime: python
+    buildCommand: pip install -r requirements-bot.txt
+    startCommand: python -m discord_bot.bot
+    autoDeploy: true
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: BYPASS_API_URL
+        value: https://bypassx-bpzt.onrender.com
+      - key: DISCORD_PREFIX
+        value: "+"
+      - key: BYPASS_API_TIMEOUT
+        value: "75"
+      - key: AUTO_BYPASS_CONFIG
+        value: data/auto_channels.json
+      - key: DISCORD_GUILD_ID
+        sync: false
