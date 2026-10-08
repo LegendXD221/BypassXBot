@@ -19,3 +19,5 @@ services:
         value: data/auto_channels.json
       - key: DISCORD_GUILD_ID
         sync: false
+      - key: BOT_OWNER_IDS
+        sync: false

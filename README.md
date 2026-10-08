@@ -11,7 +11,9 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Automatically detects up to three HTTP(S) links in configured channels.
 - Pings the user who posted the link.
 - `+status`, `+ping`, and `+help` utilities.
+- Premium branded embeds, command center, and API/GitHub buttons.
 - Admin-only auto-bypass configuration.
+- Owner-only console commands and developer-guild-only maintenance commands.
 - Safe API timeout handling and no token/API secrets in source code.
 
 ## Commands
@@ -26,6 +28,19 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 | `+status` | `/status` | Show bot/API configuration |
 | `+ping` | `/ping` | Show bot latency |
 | `+help` | — | Show command help |
+
+### Owner and developer commands
+
+Set `BOT_OWNER_IDS` to one or more comma-separated Discord user IDs. These commands are denied to everyone else:
+
+| Prefix | Slash | Access |
+|---|---|---|
+| `+ownerstatus` | `/ownerstatus` | Bot owner only |
+| `+reload` | `/reload` | Bot owner + developer guild |
+| `+sync` | `/sync` | Bot owner + developer guild |
+| `+debug` | `/debug` | Bot owner + developer guild |
+
+`DISCORD_GUILD_ID` is used as the developer guild for fast slash-command sync and maintenance-command access.
 
 Auto-bypass configuration is stored in `data/auto_channels.json`. On Render, the default filesystem is ephemeral; attach persistent storage or re-run the setup command after a worker restart if you need settings to survive restarts.
 
@@ -46,6 +61,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-bot.txt
 export DISCORD_TOKEN='your-token'
+export BOT_OWNER_IDS='your-discord-user-id'
 export BYPASS_API_URL='https://bypassx-bpzt.onrender.com'
 python -m discord_bot.bot
 ```

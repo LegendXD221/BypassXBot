@@ -34,6 +34,36 @@ API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
 PORT = env_int("PORT", 10000)
+REPO_URL = "https://github.com/LegendXD221/BypassXBot"
+API_DOCS_URL = f"{API_URL}/docs"
+
+
+def parse_ids(name: str) -> set[int]:
+    values: set[int] = set()
+    for raw in os.getenv(name, "").split(","):
+        try:
+            if raw.strip():
+                values.add(int(raw.strip()))
+        except ValueError:
+            LOG.warning("Ignoring invalid %s value", name)
+    return values
+
+
+OWNER_IDS = parse_ids("BOT_OWNER_IDS")
+try:
+    DEV_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0")) or None
+except ValueError:
+    DEV_GUILD_ID = None
+
+BRAND_COLOR = discord.Color.from_rgb(104, 89, 222)
+SUCCESS_COLOR = discord.Color.from_rgb(46, 204, 113)
+ERROR_COLOR = discord.Color.from_rgb(231, 76, 60)
+
+
+def premium_embed(title: str, description: str = "", color: discord.Color = BRAND_COLOR) -> discord.Embed:
+    embed = discord.Embed(title=f"✦ {title}", description=description, color=color)
+    embed.set_footer(text="BypassX • Fast. Clean. Reliable.")
+    return embed
 
 
 class AutoChannelStore:
@@ -49,6 +79,10 @@ class AutoChannelStore:
             self._channels = {str(key): int(value) for key, value in data.items()}
         except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
             self._channels = {}
+
+    async def reload(self) -> None:
+        async with self._lock:
+            self._load()
 
     async def get(self, guild_id: int) -> int | None:
         async with self._lock:
@@ -126,13 +160,15 @@ class BypassXBot(commands.Bot):
         allowed = discord.AllowedMentions(users=True, everyone=False, roles=False, replied_user=False)
         if result.get("success"):
             target = str(result["destination"])
-            embed = discord.Embed(title="BypassX result", color=discord.Color.green())
+            embed = premium_embed("Link resolved", "Your destination is ready.", SUCCESS_COLOR)
             embed.add_field(name="Original", value=url[:1024], inline=False)
             embed.add_field(name="Destination", value=target[:1024], inline=False)
             embed.set_footer(text=f"Service: {result.get('service', 'unknown')} • Method: {result.get('method', 'unknown')}")
-            await destination.send(f"{mention} resolved your link:", embed=embed, allowed_mentions=allowed)
+            await destination.send(f"{mention}", embed=embed, allowed_mentions=allowed)
         else:
-            await destination.send(f"{mention} I couldn't resolve that link: {result.get('error', 'unknown error')}.", allowed_mentions=allowed)
+            embed = premium_embed("Unable to resolve", result.get("error", "Unknown resolver error"), ERROR_COLOR)
+            embed.add_field(name="Original", value=url[:1024], inline=False)
+            await destination.send(f"{mention}", embed=embed, allowed_mentions=allowed)
 
     async def on_ready(self) -> None:
         if self.user:
@@ -171,9 +207,65 @@ async def web_health() -> dict[str, Any]:
 
 async def require_manage_guild(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("You need the Manage Server permission for this command.", ephemeral=True)
+        await interaction.response.send_message(embed=premium_embed("Permission required", "You need the **Manage Server** permission for this command.", ERROR_COLOR), ephemeral=True)
         return False
     return True
+
+
+async def require_owner(interaction: discord.Interaction) -> bool:
+    if interaction.user.id not in OWNER_IDS:
+        await interaction.response.send_message(embed=premium_embed("Owner only", "This command is restricted to the configured bot owner.", ERROR_COLOR), ephemeral=True)
+        return False
+    return True
+
+
+async def require_dev_owner(interaction: discord.Interaction) -> bool:
+    if not await require_owner(interaction):
+        return False
+    if not DEV_GUILD_ID or not interaction.guild or interaction.guild.id != DEV_GUILD_ID:
+        await interaction.response.send_message(embed=premium_embed("Developer guild only", "This maintenance command is available only in the configured developer server.", ERROR_COLOR), ephemeral=True)
+        return False
+    return True
+
+
+async def prefix_owner_check(ctx: commands.Context) -> bool:
+    if ctx.author.id not in OWNER_IDS:
+        raise commands.CheckFailure("owner_only")
+    return True
+
+
+async def prefix_dev_check(ctx: commands.Context) -> bool:
+    if ctx.author.id not in OWNER_IDS or not DEV_GUILD_ID or not ctx.guild or ctx.guild.id != DEV_GUILD_ID:
+        raise commands.CheckFailure("developer_guild_only")
+    return True
+
+
+class HelpView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=180)
+        self.add_item(discord.ui.Button(label="GitHub", style=discord.ButtonStyle.link, url=REPO_URL))
+        self.add_item(discord.ui.Button(label="API Docs", style=discord.ButtonStyle.link, url=API_DOCS_URL))
+
+
+def help_embed() -> discord.Embed:
+    embed = premium_embed("Command center", "Resolve links, automate channels, and manage your server with BypassX.")
+    embed.add_field(
+        name="◆ Resolver",
+        value=f"`{PREFIX}bypass <url>`\n`/bypass` — resolve a shortlink instantly",
+        inline=False,
+    )
+    embed.add_field(
+        name="◆ Automation",
+        value=f"`{PREFIX}autobypass on [#channel]`\n`{PREFIX}autobypass off`\n`/autobypass` — configure automatic link detection",
+        inline=False,
+    )
+    embed.add_field(
+        name="◆ Server tools",
+        value=f"`{PREFIX}status` • `{PREFIX}ping` • `{PREFIX}help`",
+        inline=False,
+    )
+    embed.set_thumbnail(url="https://cdn.simpleicons.org/discord/5865F2")
+    return embed
 
 
 @bot.command(name="bypass")
@@ -220,17 +312,55 @@ async def auto_bypass_command(ctx: commands.Context, action: str | None = None, 
 async def status_command(ctx: commands.Context) -> None:
     channel_id = await bot.store.get(ctx.guild.id) if ctx.guild else None
     channel_text = f"<#{channel_id}>" if channel_id else "disabled"
-    await ctx.reply(f"**BypassX status**\nAPI: `{API_URL}`\nAuto-bypass channel: {channel_text}")
+    embed = premium_embed("Server status", "Your BypassX configuration at a glance.")
+    embed.add_field(name="API", value="Online endpoint", inline=True)
+    embed.add_field(name="Auto-bypass", value=channel_text, inline=True)
+    embed.add_field(name="Prefix", value=f"`{PREFIX}`", inline=True)
+    await ctx.reply(embed=embed)
 
 
 @bot.command(name="ping")
 async def ping_command(ctx: commands.Context) -> None:
-    await ctx.reply(f"Pong: {round(bot.latency * 1000)}ms")
+    await ctx.reply(embed=premium_embed("Pong", f"Gateway latency: **{round(bot.latency * 1000)}ms**"))
 
 
 @bot.command(name="help")
 async def help_command(ctx: commands.Context) -> None:
-    await ctx.reply(f"**BypassX commands**\n`{PREFIX}bypass <url>` — bypass one URL\n`{PREFIX}autobypass [on|off] [#channel]` — configure auto-bypass\n`{PREFIX}status` — show server settings\n`{PREFIX}ping` — check bot latency\nSlash equivalents are also available.")
+    await ctx.reply(embed=help_embed(), view=HelpView())
+
+
+@bot.command(name="ownerstatus")
+@commands.check(prefix_owner_check)
+async def owner_status_command(ctx: commands.Context) -> None:
+    embed = premium_embed("Owner console", "Private runtime information.")
+    embed.add_field(name="Discord user", value=f"`{ctx.author.id}`", inline=True)
+    embed.add_field(name="Servers", value=f"`{len(bot.guilds)}`", inline=True)
+    embed.add_field(name="Developer guild", value=f"`{DEV_GUILD_ID or 'not configured'}`", inline=False)
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="reload")
+@commands.check(prefix_dev_check)
+async def reload_command(ctx: commands.Context) -> None:
+    await bot.store.reload()
+    await ctx.reply(embed=premium_embed("Configuration reloaded", "Auto-bypass settings were reloaded from disk.", SUCCESS_COLOR))
+
+
+@bot.command(name="sync")
+@commands.check(prefix_dev_check)
+async def sync_command(ctx: commands.Context) -> None:
+    synced = await bot.tree.sync()
+    await ctx.reply(embed=premium_embed("Commands synced", f"Synchronized **{len(synced)}** slash commands globally.", SUCCESS_COLOR))
+
+
+@bot.command(name="debug")
+@commands.check(prefix_dev_check)
+async def debug_command(ctx: commands.Context) -> None:
+    embed = premium_embed("Developer diagnostics", "Runtime details for the configured developer guild.")
+    embed.add_field(name="Ready", value=str(bot.is_ready()), inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="API", value=API_URL, inline=False)
+    await ctx.reply(embed=embed)
 
 
 @bot.tree.command(name="bypass", description="Resolve a shortlink with BypassX")
@@ -239,9 +369,12 @@ async def bypass_slash(interaction: discord.Interaction, url: str) -> None:
     await interaction.response.defer()
     result = await bot.resolve(url)
     if result.get("success"):
-        await interaction.followup.send(f"{interaction.user.mention} → {result['destination']}", allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+        embed = premium_embed("Link resolved", "Your destination is ready.", SUCCESS_COLOR)
+        embed.add_field(name="Destination", value=str(result["destination"])[:1024], inline=False)
+        embed.set_footer(text=f"Service: {result.get('service', 'unknown')} • Method: {result.get('method', 'unknown')}")
+        await interaction.followup.send(content=interaction.user.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
     else:
-        await interaction.followup.send(f"{interaction.user.mention} {result.get('error', 'Unable to resolve this URL')}.", allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+        await interaction.followup.send(content=interaction.user.mention, embed=premium_embed("Unable to resolve", result.get("error", "Unable to resolve this URL"), ERROR_COLOR), allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
 
 
 @bot.tree.command(name="autobypass", description="Enable or disable automatic bypass in a channel")
@@ -261,26 +394,78 @@ async def autobypass_slash(interaction: discord.Interaction, enabled: bool, chan
 @bot.tree.command(name="status", description="Show BypassX server settings")
 async def status_slash(interaction: discord.Interaction) -> None:
     channel_id = await bot.store.get(interaction.guild.id) if interaction.guild else None
-    await interaction.response.send_message(f"API: `{API_URL}`\nAuto-bypass channel: {f'<#{channel_id}>' if channel_id else 'disabled'}", ephemeral=True)
+    embed = premium_embed("Server status", "Your BypassX configuration at a glance.")
+    embed.add_field(name="API", value="Online endpoint", inline=True)
+    embed.add_field(name="Auto-bypass", value=f"<#{channel_id}>" if channel_id else "disabled", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="ping", description="Check BypassX latency")
 async def ping_slash(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(f"Pong: {round(bot.latency * 1000)}ms")
+    await interaction.response.send_message(embed=premium_embed("Pong", f"Gateway latency: **{round(bot.latency * 1000)}ms**"))
+
+
+@bot.tree.command(name="help", description="Open the BypassX command center")
+async def help_slash(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(embed=help_embed(), view=HelpView(), ephemeral=True)
+
+
+@bot.tree.command(name="ownerstatus", description="Show private bot owner diagnostics")
+async def owner_status_slash(interaction: discord.Interaction) -> None:
+    if not await require_owner(interaction):
+        return
+    embed = premium_embed("Owner console", "Private runtime information.")
+    embed.add_field(name="Servers", value=f"`{len(bot.guilds)}`", inline=True)
+    embed.add_field(name="Ready", value=str(bot.is_ready()), inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="reload", description="Reload bot configuration (developer guild only)")
+async def reload_slash(interaction: discord.Interaction) -> None:
+    if not await require_dev_owner(interaction):
+        return
+    await bot.store.reload()
+    await interaction.response.send_message(embed=premium_embed("Configuration reloaded", "Auto-bypass settings were reloaded from disk.", SUCCESS_COLOR), ephemeral=True)
+
+
+@bot.tree.command(name="sync", description="Sync slash commands (developer guild only)")
+async def sync_slash(interaction: discord.Interaction) -> None:
+    if not await require_dev_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    synced = await bot.tree.sync()
+    await interaction.followup.send(embed=premium_embed("Commands synced", f"Synchronized **{len(synced)}** slash commands globally.", SUCCESS_COLOR), ephemeral=True)
+
+
+@bot.tree.command(name="debug", description="Show private diagnostics (developer guild only)")
+async def debug_slash(interaction: discord.Interaction) -> None:
+    if not await require_dev_owner(interaction):
+        return
+    embed = premium_embed("Developer diagnostics", "Runtime details for the configured developer guild.")
+    embed.add_field(name="Ready", value=str(bot.is_ready()), inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="API", value=API_URL, inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
+    if isinstance(error, commands.CheckFailure):
+        message = "This command is restricted to the bot owner."
+        if str(error) == "developer_guild_only":
+            message = "This maintenance command is restricted to the bot owner in the developer guild."
+        await ctx.reply(embed=premium_embed("Access denied", message, ERROR_COLOR))
+        return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.reply("You need the Manage Server permission for that command.")
+        await ctx.reply(embed=premium_embed("Permission required", "You need the **Manage Server** permission for that command.", ERROR_COLOR))
         return
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.reply(f"Missing argument. Use `{PREFIX}help` for usage.")
+        await ctx.reply(embed=premium_embed("Missing argument", f"Use `{PREFIX}help` for command usage.", ERROR_COLOR))
         return
     LOG.warning("Command error: %s", type(error).__name__)
-    await ctx.reply("That command could not be completed.")
+    await ctx.reply(embed=premium_embed("Command error", "That command could not be completed.", ERROR_COLOR))
 
 
 if __name__ == "__main__":
