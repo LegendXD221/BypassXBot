@@ -82,7 +82,7 @@ class BypassXBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
         self.store = AutoChannelStore(CONFIG_PATH)
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(API_TIMEOUT, connect=15.0), follow_redirects=False)
+        self.api_client = httpx.AsyncClient(timeout=httpx.Timeout(API_TIMEOUT, connect=15.0), follow_redirects=False)
         self._guild_locks: dict[int, asyncio.Lock] = {}
 
     async def setup_hook(self) -> None:
@@ -97,7 +97,7 @@ class BypassXBot(commands.Bot):
             LOG.info("Synced global slash commands")
 
     async def close(self) -> None:
-        await self.http.aclose()
+        await self.api_client.aclose()
         await super().close()
 
     def guild_lock(self, guild_id: int) -> asyncio.Lock:
@@ -105,7 +105,7 @@ class BypassXBot(commands.Bot):
 
     async def resolve(self, url: str) -> dict[str, Any]:
         try:
-            response = await self.http.post(f"{API_URL}/bypass", json={"url": url})
+            response = await self.api_client.post(f"{API_URL}/bypass", json={"url": url})
             data = response.json()
             if response.is_success and data.get("success") and data.get("destination"):
                 return data
