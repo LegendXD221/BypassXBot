@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -44,10 +46,13 @@ API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 FALLBACK_TIMEOUT = min(120.0, env_float("BYPASS_FALLBACK_TIMEOUT", 120.0, minimum=5.0))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
+DATABASE_PATH = Path(os.getenv("BOT_DATABASE_PATH", "data/bypassx.sqlite3"))
+CACHE_TTL_SECONDS = env_float("BYPASS_CACHE_TTL", 300.0, minimum=0.0)
 PORT = env_int("PORT", 10000)
 USER_COOLDOWN_SECONDS = env_float("BYPASS_USER_COOLDOWN", 5.0)
 GUILD_COOLDOWN_SECONDS = env_float("BYPASS_GUILD_COOLDOWN", 2.0)
 MAX_CONCURRENT_BYPASSES = env_int("BYPASS_MAX_CONCURRENT", 3)
+STARTED_AT = time.time()
 
 
 def parse_ids(name: str) -> set[int]:
@@ -78,51 +83,98 @@ def premium_embed(title: str, description: str = "", color: discord.Color = BRAN
     return embed
 
 
-class AutoChannelStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
+class SQLiteStore:
+    def __init__(self, db_path: Path, legacy_path: Path | None = None) -> None:
+        self.db_path = db_path
+        self.legacy_path = legacy_path
         self._lock = asyncio.Lock()
-        self._channels: dict[str, int] = {}
-        self._load()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
 
-    def _load(self) -> None:
-        try:
-            data = json.loads(self.path.read_text())
-            self._channels = {str(key): int(value) for key, value in data.items()}
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
-            self._channels = {}
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path)
+        connection.execute("PRAGMA journal_mode=WAL")
+        return connection
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute("CREATE TABLE IF NOT EXISTS auto_channels (guild_id TEXT PRIMARY KEY, channel_id INTEGER NOT NULL)")
+            connection.execute("""CREATE TABLE IF NOT EXISTS resolution_cache (
+                original_url TEXT PRIMARY KEY,
+                destination TEXT NOT NULL,
+                service TEXT,
+                method TEXT,
+                expires_at REAL NOT NULL
+            )""")
+            if self.legacy_path and self.legacy_path.exists():
+                try:
+                    data = json.loads(self.legacy_path.read_text())
+                    for guild_id, channel_id in data.items():
+                        connection.execute(
+                            "INSERT OR IGNORE INTO auto_channels(guild_id, channel_id) VALUES (?, ?)",
+                            (str(guild_id), int(channel_id)),
+                        )
+                    self.legacy_path.rename(self.legacy_path.with_suffix(self.legacy_path.suffix + ".migrated"))
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    LOG.warning("Could not migrate legacy auto-bypass settings: %s", type(exc).__name__)
 
     async def reload(self) -> None:
         async with self._lock:
-            self._load()
+            self._initialize()
 
     async def get(self, guild_id: int) -> int | None:
         async with self._lock:
-            return self._channels.get(str(guild_id))
+            with self._connect() as connection:
+                row = connection.execute("SELECT channel_id FROM auto_channels WHERE guild_id = ?", (str(guild_id),)).fetchone()
+                return int(row[0]) if row else None
 
     async def set(self, guild_id: int, channel_id: int) -> None:
         async with self._lock:
-            self._channels[str(guild_id)] = channel_id
-            await self._save()
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO auto_channels(guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
+                    (str(guild_id), channel_id),
+                )
 
     async def remove(self, guild_id: int) -> None:
         async with self._lock:
-            self._channels.pop(str(guild_id), None)
-            await self._save()
+            with self._connect() as connection:
+                connection.execute("DELETE FROM auto_channels WHERE guild_id = ?", (str(guild_id),))
 
-    async def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix="auto-channels-", dir=self.path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self._channels, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(temp_name, self.path)
-        finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+    async def cache_get(self, original_url: str) -> dict[str, Any] | None:
+        async with self._lock:
+            now = time.time()
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT destination, service, method, expires_at FROM resolution_cache WHERE original_url = ?",
+                    (original_url,),
+                ).fetchone()
+                if not row:
+                    return None
+                if row[3] <= now:
+                    connection.execute("DELETE FROM resolution_cache WHERE original_url = ?", (original_url,))
+                    return None
+                return {"success": True, "destination": row[0], "service": row[1], "method": row[2], "cached": True}
+
+    async def cache_set(self, original_url: str, result: dict[str, Any]) -> None:
+        if CACHE_TTL_SECONDS <= 0:
+            return
+        async with self._lock:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO resolution_cache(original_url, destination, service, method, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(original_url) DO UPDATE SET destination=excluded.destination, service=excluded.service, method=excluded.method, expires_at=excluded.expires_at",
+                    (original_url, str(result["destination"]), result.get("service"), result.get("method"), time.time() + CACHE_TTL_SECONDS),
+                )
+
+    async def cache_clear(self) -> None:
+        async with self._lock:
+            with self._connect() as connection:
+                connection.execute("DELETE FROM resolution_cache")
+
+    async def cache_count(self) -> int:
+        async with self._lock:
+            with self._connect() as connection:
+                return int(connection.execute("SELECT COUNT(*) FROM resolution_cache WHERE expires_at > ?", (time.time(),)).fetchone()[0])
 
 
 class BypassLimiter:
@@ -163,7 +215,7 @@ class BypassXBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
-        self.store = AutoChannelStore(CONFIG_PATH)
+        self.store = SQLiteStore(DATABASE_PATH, CONFIG_PATH)
         self.limiter = BypassLimiter()
         self.api_client = httpx.AsyncClient(timeout=httpx.Timeout(API_TIMEOUT, connect=15.0), follow_redirects=False)
         self._guild_locks: dict[int, asyncio.Lock] = {}
@@ -254,23 +306,32 @@ class BypassXBot(commands.Bot):
         return None
 
     async def resolve(self, url: str) -> dict[str, Any]:
+        cached = await self.store.cache_get(url)
+        if cached:
+            LOG.info("Resolution cache hit")
+            return cached
+
+        result: dict[str, Any] | None = None
         try:
             response = await self.api_client.post(f"{API_URL}/bypass", json={"url": url})
             data = response.json()
             if response.is_success and data.get("success") and data.get("destination"):
-                return data
-            LOG.info("Primary BypassX API did not resolve URL; trying usebypas")
+                result = data
+            else:
+                LOG.info("Primary BypassX API did not resolve URL; trying usebypas")
         except (httpx.HTTPError, ValueError) as exc:
             LOG.info("Primary BypassX API unavailable: %s; trying usebypas", type(exc).__name__)
 
-        fallback = await self._resolve_usebypas(url)
-        if fallback:
-            return fallback
-        LOG.info("usebypas did not resolve URL; trying FastForward crowd")
+        if result is None:
+            result = await self._resolve_usebypas(url)
+        if result is None:
+            LOG.info("usebypas did not resolve URL; trying FastForward crowd")
 
-        fallback = await self._resolve_crowd(url)
-        if fallback:
-            return fallback
+        if result is None:
+            result = await self._resolve_crowd(url)
+        if result:
+            await self.store.cache_set(url, result)
+            return result
         return {"success": False, "error": "Unable to resolve this URL through the configured providers"}
 
     async def send_result(
@@ -334,12 +395,23 @@ web_app = FastAPI(title="BypassXBot", version="1.0.0")
 
 @web_app.get("/")
 async def web_root() -> dict[str, Any]:
-    return {"name": "BypassXBot", "status": "online", "discord_ready": bot.is_ready()}
+    return {
+        "name": "BypassXBot",
+        "status": "online",
+        "discord_ready": bot.is_ready(),
+        "uptime_seconds": round(time.time() - STARTED_AT),
+        "cache_entries": await bot.store.cache_count(),
+    }
 
 
 @web_app.get("/health")
 async def web_health() -> dict[str, Any]:
-    return {"status": "ok", "discord_ready": bot.is_ready()}
+    return {
+        "status": "ok",
+        "discord_ready": bot.is_ready(),
+        "uptime_seconds": round(time.time() - STARTED_AT),
+        "cache_entries": await bot.store.cache_count(),
+    }
 
 
 async def require_manage_guild(interaction: discord.Interaction) -> bool:
@@ -446,6 +518,7 @@ async def status_command(ctx: commands.Context) -> None:
     embed.add_field(name="API", value="Online endpoint", inline=True)
     embed.add_field(name="Auto-bypass", value=channel_text, inline=True)
     embed.add_field(name="Prefix", value=f"`{PREFIX}`", inline=True)
+    embed.add_field(name="Cache", value=f"`{await bot.store.cache_count()}` active entries", inline=True)
     await ctx.reply(embed=embed)
 
 
@@ -466,6 +539,8 @@ async def owner_status_command(ctx: commands.Context) -> None:
     embed.add_field(name="Discord user", value=f"`{ctx.author.id}`", inline=True)
     embed.add_field(name="Servers", value=f"`{len(bot.guilds)}`", inline=True)
     embed.add_field(name="Developer guild", value=f"`{DEV_GUILD_ID or 'not configured'}`", inline=False)
+    embed.add_field(name="Cache entries", value=f"`{await bot.store.cache_count()}`", inline=True)
+    embed.add_field(name="Database", value=f"`{DATABASE_PATH}`", inline=False)
     await ctx.reply(embed=embed)
 
 
@@ -491,6 +566,13 @@ async def debug_command(ctx: commands.Context) -> None:
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="API", value=API_URL, inline=False)
     await ctx.reply(embed=embed)
+
+
+@bot.command(name="cacheclear")
+@commands.check(prefix_dev_check)
+async def cache_clear_command(ctx: commands.Context) -> None:
+    await bot.store.cache_clear()
+    await ctx.reply(embed=premium_embed("Cache cleared", "All stored successful resolutions were removed.", SUCCESS_COLOR))
 
 
 @bot.tree.command(name="bypass", description="Resolve a shortlink with BypassX")
@@ -526,6 +608,7 @@ async def status_slash(interaction: discord.Interaction) -> None:
     embed = premium_embed("Server status", "Your BypassX configuration at a glance.")
     embed.add_field(name="API", value="Online endpoint", inline=True)
     embed.add_field(name="Auto-bypass", value=f"<#{channel_id}>" if channel_id else "disabled", inline=True)
+    embed.add_field(name="Cache", value=f"`{await bot.store.cache_count()}` active entries", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -546,6 +629,7 @@ async def owner_status_slash(interaction: discord.Interaction) -> None:
     embed = premium_embed("Owner console", "Private runtime information.")
     embed.add_field(name="Servers", value=f"`{len(bot.guilds)}`", inline=True)
     embed.add_field(name="Ready", value=str(bot.is_ready()), inline=True)
+    embed.add_field(name="Cache entries", value=f"`{await bot.store.cache_count()}`", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -575,6 +659,14 @@ async def debug_slash(interaction: discord.Interaction) -> None:
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="API", value=API_URL, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="cacheclear", description="Clear cached resolutions (developer guild only)")
+async def cache_clear_slash(interaction: discord.Interaction) -> None:
+    if not await require_dev_owner(interaction):
+        return
+    await bot.store.cache_clear()
+    await interaction.response.send_message(embed=premium_embed("Cache cleared", "All stored successful resolutions were removed.", SUCCESS_COLOR), ephemeral=True)
 
 
 @bot.event

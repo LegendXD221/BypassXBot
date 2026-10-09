@@ -23,6 +23,10 @@ services:
         value: "75"
       - key: AUTO_BYPASS_CONFIG
         value: data/auto_channels.json
+      - key: BOT_DATABASE_PATH
+        value: data/bypassx.sqlite3
+      - key: BYPASS_CACHE_TTL
+        value: "300"
       - key: DISCORD_GUILD_ID
         sync: false
       - key: BOT_OWNER_IDS

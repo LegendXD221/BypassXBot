@@ -8,7 +8,7 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Slash commands using Discord's `/` command menu.
 - `+bypass <url>` and `/bypass` for manual resolution.
 - Server-configurable auto-bypass channel.
-- Automatically detects up to three HTTP(S) links in configured channels.
+- Automatically detects one HTTP(S) link per message in configured channels.
 - Pings the user who posted the link.
 - `+status`, `+ping`, and `+help` utilities.
 - Premium branded embeds and command center.
@@ -17,6 +17,8 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Safe API timeout handling and no token/API secrets in source code.
 - Anti-abuse protection with per-user cooldowns, per-server cooldowns, and a global concurrency cap.
 - Sequential resolver fallback: BypassX API, usebypas, then FastForward crowd query.
+- SQLite-backed auto-bypass settings that survive process restarts when persistent storage is attached.
+- Successful-resolution cache to reduce duplicate upstream requests.
 
 ## Commands
 
@@ -41,10 +43,11 @@ Set `BOT_OWNER_IDS` to one or more comma-separated Discord user IDs. These comma
 | `+reload` | `/reload` | Bot owner + developer guild |
 | `+sync` | `/sync` | Bot owner + developer guild |
 | `+debug` | `/debug` | Bot owner + developer guild |
+| `+cacheclear` | `/cacheclear` | Bot owner + developer guild |
 
 `DISCORD_GUILD_ID` is used as the developer guild for fast slash-command sync and maintenance-command access.
 
-Auto-bypass configuration is stored in `data/auto_channels.json`. On Render, the default filesystem is ephemeral; attach persistent storage or re-run the setup command after a worker restart if you need settings to survive restarts.
+Auto-bypass configuration and the resolution cache are stored in `BOT_DATABASE_PATH` (default `data/bypassx.sqlite3`). The old `data/auto_channels.json` file is migrated automatically once. On Render, attach persistent storage if settings and cache entries must survive service restarts.
 
 ## Rate limits and cooldowns
 
@@ -80,6 +83,8 @@ export BYPASS_CROWD_API_URL='https://crowd.fastforward.team/crowd/query_v1'
 export BYPASS_USER_COOLDOWN='5'
 export BYPASS_GUILD_COOLDOWN='2'
 export BYPASS_MAX_CONCURRENT='3'
+export BOT_DATABASE_PATH='data/bypassx.sqlite3'
+export BYPASS_CACHE_TTL='300'
 python -m discord_bot.bot
 ```
 
