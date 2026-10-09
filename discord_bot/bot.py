@@ -40,7 +40,7 @@ def env_float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 API_URL = os.getenv("BYPASS_API_URL", "https://bypassx-bpzt.onrender.com").rstrip("/")
-FALLBACK_API_URL = os.getenv("BYPASS_FALLBACK_API_URL", "https://usebypas.com/api/v1/bypass").rstrip("?")
+FALLBACK_API_URL = os.getenv("BYPASS_FALLBACK_API_URL", "https://usebypass.com/api/v1/bypass").rstrip("?")
 CROWD_API_URL = os.getenv("BYPASS_CROWD_API_URL", "https://crowd.fastforward.team/crowd/query_v1").rstrip("/")
 API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
 FALLBACK_TIMEOUT = min(120.0, env_float("BYPASS_FALLBACK_TIMEOUT", 120.0, minimum=5.0))
