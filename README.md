@@ -16,6 +16,7 @@ A Discord bot that uses the public **BypassX API** to resolve supported shortlin
 - Owner-only console commands and developer-guild-only maintenance commands.
 - Safe API timeout handling and no token/API secrets in source code.
 - Anti-abuse protection with per-user cooldowns, per-server cooldowns, and a global concurrency cap.
+- Sequential resolver fallback: BypassX API, usebypas, then FastForward crowd query.
 
 ## Commands
 
@@ -74,11 +75,25 @@ pip install -r requirements-bot.txt
 export DISCORD_TOKEN='your-token'
 export BOT_OWNER_IDS='your-discord-user-id'
 export BYPASS_API_URL='https://bypassx-bpzt.onrender.com'
+export BYPASS_FALLBACK_API_URL='https://usebypas.com/api/v1/bypass'
+export BYPASS_CROWD_API_URL='https://crowd.fastforward.team/crowd/query_v1'
 export BYPASS_USER_COOLDOWN='5'
 export BYPASS_GUILD_COOLDOWN='2'
 export BYPASS_MAX_CONCURRENT='3'
 python -m discord_bot.bot
 ```
+
+### Resolver fallback order
+
+When a bypass request does not produce a valid destination, the bot tries providers in this order:
+
+1. `BYPASS_API_URL` — the primary BypassX API.
+2. `BYPASS_FALLBACK_API_URL` — `usebypas.com/api/v1/bypass?url=...`.
+3. `BYPASS_CROWD_API_URL` — FastForward’s documented form-encoded crowd query using the link hostname and path.
+
+Every provider response is validated as an HTTP(S) destination. Provider failures are logged by name without logging tokens or sensitive request data. The fallback chain remains subject to the bot’s cooldowns, concurrency cap, and API timeouts.
+
+The usebypas provider has a separate `BYPASS_FALLBACK_TIMEOUT` setting, defaulting to `120` seconds to support resolutions that take from one second up to two minutes. The primary BypassX API keeps its shorter timeout.
 
 ## Render Web Service
 

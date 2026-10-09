@@ -8,6 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import discord
 import httpx
@@ -37,7 +38,10 @@ def env_float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 API_URL = os.getenv("BYPASS_API_URL", "https://bypassx-bpzt.onrender.com").rstrip("/")
+FALLBACK_API_URL = os.getenv("BYPASS_FALLBACK_API_URL", "https://usebypas.com/api/v1/bypass").rstrip("?")
+CROWD_API_URL = os.getenv("BYPASS_CROWD_API_URL", "https://crowd.fastforward.team/crowd/query_v1").rstrip("/")
 API_TIMEOUT = max(5.0, float(os.getenv("BYPASS_API_TIMEOUT", "75")))
+FALLBACK_TIMEOUT = min(120.0, env_float("BYPASS_FALLBACK_TIMEOUT", 120.0, minimum=5.0))
 PREFIX = os.getenv("DISCORD_PREFIX", "+")
 CONFIG_PATH = Path(os.getenv("AUTO_BYPASS_CONFIG", "data/auto_channels.json"))
 PORT = env_int("PORT", 10000)
@@ -182,19 +186,92 @@ class BypassXBot(commands.Bot):
     def guild_lock(self, guild_id: int) -> asyncio.Lock:
         return self._guild_locks.setdefault(guild_id, asyncio.Lock())
 
+    @staticmethod
+    def _destination_from_payload(payload: Any, original_url: str) -> str | None:
+        candidate: Any = payload
+        if isinstance(payload, dict):
+            for key in ("destination", "url", "target", "result", "link"):
+                if payload.get(key):
+                    candidate = payload[key]
+                    break
+        if not isinstance(candidate, str):
+            return None
+        candidate = candidate.strip().strip('"\'')
+        if candidate.startswith("//"):
+            candidate = "https:" + candidate
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        if candidate.rstrip("/") == original_url.rstrip("/"):
+            return None
+        return candidate
+
+    async def _resolve_usebypas(self, url: str) -> dict[str, Any] | None:
+        try:
+            response = await self.api_client.get(
+                FALLBACK_API_URL,
+                params={"url": url},
+                timeout=FALLBACK_TIMEOUT,
+            )
+            if not response.is_success:
+                LOG.info("Fallback provider usebypas returned status=%s", response.status_code)
+                return None
+            try:
+                payload: Any = response.json()
+            except ValueError:
+                payload = response.text
+            destination = self._destination_from_payload(payload, url)
+            if destination:
+                return {"success": True, "destination": destination, "method": "usebypas"}
+        except (httpx.HTTPError, ValueError) as exc:
+            LOG.info("Fallback provider usebypas unavailable: %s", type(exc).__name__)
+        return None
+
+    async def _resolve_crowd(self, url: str) -> dict[str, Any] | None:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return None
+        path = parsed.path.lstrip("/")
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        try:
+            response = await self.api_client.post(
+                CROWD_API_URL,
+                data={"domain": parsed.hostname, "path": path},
+            )
+            if response.status_code == 204 or not response.is_success:
+                LOG.info("FastForward crowd provider returned status=%s", response.status_code)
+                return None
+            try:
+                payload: Any = response.json()
+            except ValueError:
+                payload = response.text
+            destination = self._destination_from_payload(payload, url)
+            if destination:
+                return {"success": True, "destination": destination, "method": "fastforward-crowd"}
+        except (httpx.HTTPError, ValueError) as exc:
+            LOG.info("FastForward crowd provider unavailable: %s", type(exc).__name__)
+        return None
+
     async def resolve(self, url: str) -> dict[str, Any]:
         try:
             response = await self.api_client.post(f"{API_URL}/bypass", json={"url": url})
             data = response.json()
             if response.is_success and data.get("success") and data.get("destination"):
                 return data
-            return {"success": False, "error": data.get("error", "Unable to resolve this URL")}
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            LOG.warning("Bypass API unavailable: %s", type(exc).__name__)
-            return {"success": False, "error": "Bypass API timed out or is unavailable"}
-        except (httpx.HTTPError, ValueError):
-            LOG.exception("Invalid Bypass API response")
-            return {"success": False, "error": "Bypass API returned an invalid response"}
+            LOG.info("Primary BypassX API did not resolve URL; trying usebypas")
+        except (httpx.HTTPError, ValueError) as exc:
+            LOG.info("Primary BypassX API unavailable: %s; trying usebypas", type(exc).__name__)
+
+        fallback = await self._resolve_usebypas(url)
+        if fallback:
+            return fallback
+        LOG.info("usebypas did not resolve URL; trying FastForward crowd")
+
+        fallback = await self._resolve_crowd(url)
+        if fallback:
+            return fallback
+        return {"success": False, "error": "Unable to resolve this URL through the configured providers"}
 
     async def send_result(
         self,

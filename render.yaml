@@ -11,6 +11,12 @@ services:
         sync: false
       - key: BYPASS_API_URL
         value: https://bypassx-bpzt.onrender.com
+      - key: BYPASS_FALLBACK_API_URL
+        value: https://usebypas.com/api/v1/bypass
+      - key: BYPASS_CROWD_API_URL
+        value: https://crowd.fastforward.team/crowd/query_v1
+      - key: BYPASS_FALLBACK_TIMEOUT
+        value: "120"
       - key: DISCORD_PREFIX
         value: "+"
       - key: BYPASS_API_TIMEOUT
