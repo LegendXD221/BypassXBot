@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -51,11 +50,6 @@ API_URL = os.getenv(
 FALLBACK_API_URL = os.getenv(
     "BYPASS_FALLBACK_API_URL",
     "https://usebypass.com/api/v1/bypass",
-).rstrip("/")
-
-CROWD_API_URL = os.getenv(
-    "BYPASS_CROWD_API_URL",
-    "https://crowd.fastforward.team/crowd/query_v1",
 ).rstrip("/")
 
 API_TIMEOUT = max(
@@ -468,7 +462,7 @@ class BypassXBot(commands.Bot):
         )
 
     # ---------------------------------------------------------
-    # FIXED: Destination extraction
+    # Destination extraction
     # ---------------------------------------------------------
 
     @staticmethod
@@ -478,13 +472,6 @@ class BypassXBot(commands.Bot):
     ) -> str | None:
         """
         Extract destination URLs from direct or nested API responses.
-
-        Supports:
-        {"url": "https://example.com"}
-
-        {"result": {"url": "https://example.com"}}
-
-        {"data": {"destination": "https://example.com"}}
         """
 
         original = original_url.rstrip("/")
@@ -536,7 +523,7 @@ class BypassXBot(commands.Bot):
         return find_url(payload)
 
     # ---------------------------------------------------------
-    # FIXED: UseBypass with HTTP 202 polling
+    # UseBypass resolver with HTTP 202 polling
     # ---------------------------------------------------------
 
     async def _resolve_usebypas(
@@ -578,7 +565,6 @@ class BypassXBot(commands.Bot):
                     "method": "usebypas",
                 }
 
-            # First, check for an immediate destination.
             destination = self._destination_from_payload(
                 payload,
                 url,
@@ -603,7 +589,6 @@ class BypassXBot(commands.Bot):
                 "RESOLVING",
             }
 
-            # Do not poll if the response isn't pending.
             if (
                 response.status_code != 202
                 and status not in pending_statuses
@@ -634,7 +619,6 @@ class BypassXBot(commands.Bot):
                 if remaining <= 0:
                     break
 
-                # Poll every two seconds.
                 await asyncio.sleep(min(2.0, remaining))
 
                 remaining = deadline - loop.time()
@@ -719,38 +703,29 @@ class BypassXBot(commands.Bot):
         return None
 
     # ---------------------------------------------------------
-    # FastForward community lookup
+    # TRW API resolver
     # ---------------------------------------------------------
 
-    async def _resolve_crowd(
+    async def _resolve_trw(
         self,
         url: str,
     ) -> dict[str, Any] | None:
-        parsed = urlparse(url)
-
-        if not parsed.hostname:
-            return None
-
-        path = parsed.path.lstrip("/")
-
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
+        """Resolve URLs through TRW without an API key."""
 
         try:
-            response = await self.api_client.post(
-                CROWD_API_URL,
-                data={
-                    "domain": parsed.hostname,
-                    "path": path,
+            response = await self.api_client.get(
+                "https://trw.lat/api/bypass",
+                params={
+                    "url": url,
+                    "mode": "stream",
+                    "verbose": "true",
                 },
+                timeout=FALLBACK_TIMEOUT,
             )
 
-            if (
-                response.status_code == 204
-                or not response.is_success
-            ):
+            if not response.is_success:
                 LOG.info(
-                    "FastForward crowd provider returned status=%s",
+                    "TRW returned HTTP %s",
                     response.status_code,
                 )
                 return None
@@ -758,31 +733,47 @@ class BypassXBot(commands.Bot):
             try:
                 payload: Any = response.json()
             except ValueError:
-                payload = response.text
+                LOG.info("TRW returned invalid JSON")
+                return None
+
+            if not isinstance(payload, dict):
+                return None
+
+            if payload.get("success") is not True:
+                LOG.info("TRW did not resolve the URL")
+                return None
 
             destination = self._destination_from_payload(
                 payload,
                 url,
             )
 
-            if destination:
-                return {
-                    "success": True,
-                    "destination": destination,
-                    "service": "fastforward-crowd",
-                    "method": "fastforward-crowd",
-                }
+            if not destination:
+                LOG.info("TRW returned no valid destination")
+                return None
 
-        except (httpx.HTTPError, ValueError) as exc:
+            LOG.info("TRW successfully resolved URL")
+
+            return {
+                "success": True,
+                "destination": destination,
+                "service": "trw",
+                "method": "trw-api",
+            }
+
+        except httpx.TimeoutException:
+            LOG.info("TRW request timed out")
+
+        except httpx.HTTPError as exc:
             LOG.info(
-                "FastForward crowd provider unavailable: %s",
+                "TRW provider unavailable: %s",
                 type(exc).__name__,
             )
 
         return None
 
     # ---------------------------------------------------------
-    # Resolver chain
+    # Resolver chain: BypassX -> UseBypass -> TRW
     # ---------------------------------------------------------
 
     async def resolve(self, url: str) -> dict[str, Any]:
@@ -821,7 +812,7 @@ class BypassXBot(commands.Bot):
                     "Primary API did not resolve URL; trying UseBypass"
                 )
 
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPError as exc:
             LOG.info(
                 "Primary API unavailable: %s; trying UseBypass",
                 type(exc).__name__,
@@ -833,12 +824,12 @@ class BypassXBot(commands.Bot):
 
         if result is None:
             LOG.info(
-                "UseBypass did not resolve URL; trying FastForward"
+                "UseBypass did not resolve URL; trying TRW"
             )
 
-        # Provider 3: FastForward community lookup.
+        # Provider 3: TRW.
         if result is None:
-            result = await self._resolve_crowd(url)
+            result = await self._resolve_trw(url)
 
         if result:
             await self.store.cache_set(url, result)
